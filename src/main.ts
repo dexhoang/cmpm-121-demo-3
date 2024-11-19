@@ -4,6 +4,7 @@ import luck from "./luck.ts";
 import "leaflet/dist/leaflet.css";
 import "./style.css";
 import "./leafletWorkaround.ts";
+import { Board, type Cell } from "./board.ts";
 
 //set constant values
 const mapCenter = leaflet.latLng(36.98949379578401, -122.06277128548504);
@@ -14,13 +15,14 @@ const cacheSpawnRate = 0.1;
 
 //game variables
 const playerPoints = 0;
-let playerInventory = 0;
-
-//dictionary to hold cache coin values
-const cacheValues: Record<string, number> = {};
 
 //display for player points
 const statusPanel = document.querySelector<HTMLDivElement>("#statusPanel")!;
+
+//keeps track of coins/inventory
+const coinInCache: Record<string, { i: number; j: number; serial: number }[]> =
+  {};
+const playerInventory: { i: number; j: number; serial: number }[] = [];
 
 //function creates map
 function CreateMap(): leaflet.Map {
@@ -48,77 +50,91 @@ function InitializePlayer(map: leaflet.Map) {
   player.bindTooltip("You are Here!");
   player.addTo(map);
   statusPanel.innerHTML =
-    `${playerPoints} points | Inventory: ${playerInventory} coins`;
+    `${playerPoints} points | Inventory: ${playerInventory}`;
 }
 
-//spawns cache near player's neighborhood
-function SpawnCacheMarkers(map: leaflet.Map) {
-  for (let i = -cacheNeighborhoodSize; i < cacheNeighborhoodSize; i++) {
-    for (let j = -cacheNeighborhoodSize; j < cacheNeighborhoodSize; j++) {
-      if (luck([i, j].toString()) < cacheSpawnRate) {
-        AddCacheMarker(map, i, j);
-      }
+function InitializeCacheCoins(cell: Cell, coinCount: number) {
+  const cacheKey = `${cell.i},${cell.j}`;
+  if (!(cacheKey in coinInCache)) {
+    coinInCache[cacheKey] = [];
+    for (let serial = 0; serial < coinCount; serial++) {
+      coinInCache[cacheKey].push({
+        i: cell.i,
+        j: cell.j,
+        serial,
+      });
     }
   }
 }
 
-function AddCacheMarker(map: leaflet.Map, i: number, j: number) {
-  const bounds = CalculateCacheBounds(i, j);
-  const rect = leaflet.rectangle(bounds);
-  rect.addTo(map);
-  BindCachePopup(rect, i, j);
+//spawns cache near player's neighborhood
+function SpawnCacheMarkers(map: leaflet.Map, board: Board) {
+  const cells = board.getCellsNearPoint(mapCenter);
+  for (const cell of cells) {
+    if (luck(`${cell.i},${cell.j}`) < cacheSpawnRate) {
+      AddCacheMarker(map, board, cell);
+    }
+  }
 }
 
-//returns bounds for cache
-function CalculateCacheBounds(i: number, j: number): leaflet.latLngBounds {
-  const origin = mapCenter;
-  return leaflet.latLngBounds([
-    [origin.lat + i * tileSizeDegrees, origin.lng + j * tileSizeDegrees],
-    [
-      origin.lat + (i + 1) * tileSizeDegrees,
-      origin.lng + (j + 1) * tileSizeDegrees,
-    ],
-  ]);
+function AddCacheMarker(map: leaflet.Map, board: Board, cell: Cell) {
+  const bounds = board.getCellBounds(cell);
+  const rect = leaflet.rectangle(bounds);
+  rect.addTo(map);
+  const coinCount = Math.floor(luck(`${cell.i},${cell.j},value`) * 20);
+  InitializeCacheCoins(cell, coinCount);
+
+  BindCachePopup(rect, cell);
 }
 
 //binds popup to a cache, allow for player withdraw/deposit coins
-function BindCachePopup(rect: leaflet.Rectangle, i: number, j: number) {
-  const cacheKey = `${i},${j}`;
-
-  if (!(cacheKey in cacheValues)) {
-    cacheValues[cacheKey] = Math.floor(luck([i, j, "value"].toString()) * 100);
-  }
+function BindCachePopup(rect: leaflet.Rectangle, cell: Cell) {
+  const cacheKey = `${cell.i},${cell.j}`;
+  const cacheCoins = coinInCache[cacheKey] || [];
 
   rect.bindPopup(() => {
-    let cacheValue = cacheValues[cacheKey];
+    const coinList = cacheCoins.map((coin) =>
+      `<li>${coin.i}: ${coin.j} #${coin.serial}</li>`
+    ).join("");
 
     const popupDiv = document.createElement("div");
-    popupDiv.innerHTML =
-      `<div>Cache at "${i},${j}" with <span id="cache-value">${cacheValue}</span> coins.</div>
+    popupDiv.innerHTML = `<div>Cache at "${cell.i},${cell.j}"</div>
+      <div>Inventory:</div>
+      <ul>${coinList}</ul>
       <button id="collect">Collect</button>
       <button id="deposit">Deposit</button>`;
 
     popupDiv.querySelector("#collect")!.addEventListener("click", () => {
-      if (cacheValue > 0) {
-        playerInventory++;
-        cacheValue--;
-        cacheValues[cacheKey] = cacheValue; // Update stored cache value
-        statusPanel.innerHTML =
-          `${playerPoints} points | Inventory: ${playerInventory} coins`;
-        popupDiv.querySelector("#cache-value")!.textContent = cacheValue
-          .toString();
+      if (cacheCoins.length > 0) {
+        const collectedCoin = cacheCoins.shift();
+
+        if (collectedCoin) {
+          playerInventory.push(collectedCoin);
+          console.log("Collected coin: ", collectedCoin);
+
+          UpdateInventory();
+
+          popupDiv.querySelector("ul")!.innerHTML = cacheCoins.map((coin) =>
+            `<li>${coin.i}: ${coin.j} #${coin.serial}</li>`
+          ).join("");
+        }
       }
     });
 
     popupDiv.querySelector("#deposit")!.addEventListener("click", () => {
-      if (playerInventory > 0) {
-        playerInventory--;
-        cacheValue++;
-        cacheValues[cacheKey] = cacheValue; // Update stored cache value
-        statusPanel.innerHTML =
-          `${playerPoints} points | Inventory: ${playerInventory} coins`;
-        popupDiv.querySelector("#cache-value")!.textContent = cacheValue
-          .toString();
+      if (playerInventory.length > 0) {
+        const depositedCoin = playerInventory.shift();
+
+        if (depositedCoin) {
+          cacheCoins.push(depositedCoin);
+          console.log("Deposited coin:", depositedCoin);
+
+          UpdateInventory();
+
+          popupDiv.querySelector("ul")!.innerHTML = cacheCoins.map((coin) =>
+            `<li>${coin.i}: ${coin.j} #${coin.serial}</li>`
+          ).join("");
+        }
       }
     });
 
@@ -126,11 +142,22 @@ function BindCachePopup(rect: leaflet.Rectangle, i: number, j: number) {
   });
 }
 
+function UpdateInventory() {
+  const inventoryList = playerInventory.map((coin) =>
+    `${coin.i}: ${coin.j} #${coin.serial}`
+  ).join("<br>");
+
+  statusPanel.innerHTML =
+    `${playerPoints} points | Inventory: ${playerInventory.length} coins
+    <div><br>${inventoryList}</div>`;
+}
+
 //starts game
 function CreateGame() {
   const map = CreateMap();
+  const board = new Board(tileSizeDegrees, cacheNeighborhoodSize);
   InitializePlayer(map);
-  SpawnCacheMarkers(map);
+  SpawnCacheMarkers(map, board);
 }
 
 CreateGame();
