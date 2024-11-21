@@ -1,3 +1,32 @@
+//momento pattern
+interface Momento<T> {
+  toMomento(): T;
+  fromMomento(momento: T): void;
+}
+
+class Geocache implements Momento<string> {
+  i: number;
+  j: number;
+  numCoins: number;
+
+  constructor(i: number, j: number, numCoins: number) {
+    this.i = i;
+    this.j = j;
+    this.numCoins = numCoins;
+  }
+
+  toMomento(): string {
+    return JSON.stringify({ i: this.i, j: this.j, numCoins: this.numCoins });
+  }
+
+  fromMomento(momento: string): void {
+    const { i, j, numCoins } = JSON.parse(momento);
+    this.i = i;
+    this.j = j;
+    this.numCoins = numCoins;
+  }
+}
+
 //imports
 import leaflet from "leaflet";
 import luck from "./luck.ts";
@@ -12,17 +41,31 @@ const zoomLevel = 19;
 const tileSizeDegrees = 1e-4;
 const cacheNeighborhoodSize = 8;
 const cacheSpawnRate = 0.1;
+const playerMovement = 1e-4;
+const playerPoints = 0;
 
 //game variables
-const playerPoints = 0;
+let playerPosition = mapCenter;
+let playerMarker: leaflet.Marker;
+let map: leaflet.Map;
+let board: Board;
 
 //display for player points
 const statusPanel = document.querySelector<HTMLDivElement>("#statusPanel")!;
 
-//keeps track of coins/inventory
+//keeps track of coins/inventory/caches
 const coinInCache: Record<string, { i: number; j: number; serial: number }[]> =
   {};
 const playerInventory: { i: number; j: number; serial: number }[] = [];
+const cacheState: Record<string, string> = {};
+
+//starts game
+function CreateGame() {
+  map = CreateMap();
+  board = new Board(tileSizeDegrees, cacheNeighborhoodSize);
+  InitializePlayer(map);
+  SpawnCacheMarkers(map, board);
+}
 
 //function creates map
 function CreateMap(): leaflet.Map {
@@ -46,9 +89,10 @@ function CreateMap(): leaflet.Map {
 
 //adds player marker
 function InitializePlayer(map: leaflet.Map) {
-  const player = leaflet.marker(mapCenter);
-  player.bindTooltip("You are Here!");
-  player.addTo(map);
+  playerMarker = leaflet.marker(mapCenter);
+  playerMarker.bindTooltip("You are Here!");
+  playerMarker.addTo(map);
+
   statusPanel.innerHTML =
     `${playerPoints} points | Inventory: ${playerInventory}`;
 }
@@ -69,10 +113,44 @@ function InitializeCacheCoins(cell: Cell, coinCount: number) {
 
 //spawns cache near player's neighborhood
 function SpawnCacheMarkers(map: leaflet.Map, board: Board) {
-  const cells = board.getCellsNearPoint(mapCenter);
+  //removes rectangles from map
+  map.eachLayer((layer: leaflet.Layer) => {
+    if (layer instanceof leaflet.Rectangle) {
+      map.removeLayer(layer);
+    }
+  });
+
+  const cells = board.getCellsNearPoint(playerPosition);
+  const visibleCaches = new Set();
+
   for (const cell of cells) {
-    if (luck(`${cell.i},${cell.j}`) < cacheSpawnRate) {
+    const cacheKey = `${cell.i},${cell.j}`;
+    visibleCaches.add(cacheKey);
+
+    //restores caches from momento, otherwise create new cache
+    if (cacheState[cacheKey]) {
+      const geoCache = new Geocache(0, 0, 0);
+      geoCache.fromMomento(cacheState[cacheKey]);
       AddCacheMarker(map, board, cell);
+    } else if (luck(cacheKey) < cacheSpawnRate) {
+      AddCacheMarker(map, board, cell);
+
+      const geoCache = new Geocache(
+        cell.i,
+        cell.j,
+        Math.floor(luck(`${cell.i},${cell.j},value`) * 20),
+      );
+      cacheState[cacheKey] = geoCache.toMomento();
+    }
+  }
+
+  //saves states for caches out of range
+  for (const cacheKey in cacheState) {
+    if (!visibleCaches.has(cacheKey)) {
+      const cell = cacheKey.split(",").map(Number);
+      const geocache = new Geocache(cell[0], cell[1], 0);
+      geocache.fromMomento(cacheState[cacheKey]);
+      cacheState[cacheKey] = geocache.toMomento();
     }
   }
 }
@@ -93,47 +171,47 @@ function BindCachePopup(rect: leaflet.Rectangle, cell: Cell) {
   const cacheCoins = coinInCache[cacheKey] || [];
 
   rect.bindPopup(() => {
-    const coinList = cacheCoins.map((coin) =>
-      `<li>${coin.i}: ${coin.j} #${coin.serial}</li>`
-    ).join("");
-
     const popupDiv = document.createElement("div");
     popupDiv.innerHTML = `<div>Cache at "${cell.i},${cell.j}"</div>
       <div>Inventory:</div>
-      <ul>${coinList}</ul>
+      <ul>${
+      cacheCoins.map((coin) => `<li>${coin.i}: ${coin.j} #${coin.serial}</li>`)
+        .join("")
+    }</ul>
       <button id="collect">Collect</button>
       <button id="deposit">Deposit</button>`;
 
+    //updates cache inventory when player collects from cache
     popupDiv.querySelector("#collect")!.addEventListener("click", () => {
       if (cacheCoins.length > 0) {
         const collectedCoin = cacheCoins.shift();
-
         if (collectedCoin) {
           playerInventory.push(collectedCoin);
-          console.log("Collected coin: ", collectedCoin);
-
           UpdateInventory();
+          UpdateCacheState(cacheKey);
 
-          popupDiv.querySelector("ul")!.innerHTML = cacheCoins.map((coin) =>
-            `<li>${coin.i}: ${coin.j} #${coin.serial}</li>`
-          ).join("");
+          //refreshes popup
+          rect.closePopup();
+          rect.unbindPopup();
+          BindCachePopup(rect, cell);
+          rect.openPopup();
         }
       }
     });
 
+    //updates cache inventory when player deposits to cache
     popupDiv.querySelector("#deposit")!.addEventListener("click", () => {
       if (playerInventory.length > 0) {
         const depositedCoin = playerInventory.shift();
-
         if (depositedCoin) {
           cacheCoins.push(depositedCoin);
-          console.log("Deposited coin:", depositedCoin);
-
           UpdateInventory();
+          UpdateCacheState(cacheKey);
 
-          popupDiv.querySelector("ul")!.innerHTML = cacheCoins.map((coin) =>
-            `<li>${coin.i}: ${coin.j} #${coin.serial}</li>`
-          ).join("");
+          rect.closePopup();
+          rect.unbindPopup();
+          BindCachePopup(rect, cell);
+          rect.openPopup();
         }
       }
     });
@@ -142,6 +220,14 @@ function BindCachePopup(rect: leaflet.Rectangle, cell: Cell) {
   });
 }
 
+//updates caches when coins are collected/deposited
+function UpdateCacheState(cacheKey: string) {
+  const [i, j] = cacheKey.split(",").map(Number);
+  const geocache = new Geocache(i, j, coinInCache[cacheKey]?.length || 0);
+  cacheState[cacheKey] = geocache.toMomento();
+}
+
+//updates inventory values
 function UpdateInventory() {
   const inventoryList = playerInventory.map((coin) =>
     `${coin.i}: ${coin.j} #${coin.serial}`
@@ -152,12 +238,49 @@ function UpdateInventory() {
     <div><br>${inventoryList}</div>`;
 }
 
-//starts game
-function CreateGame() {
-  const map = CreateMap();
-  const board = new Board(tileSizeDegrees, cacheNeighborhoodSize);
-  InitializePlayer(map);
+//add listener events for buttons to move player/map and generate new caches
+const northButton = document.getElementById("north");
+northButton?.addEventListener("click", () => {
+  playerPosition = leaflet.latLng(
+    playerPosition.lat + playerMovement,
+    playerPosition.lng,
+  );
+  playerMarker.setLatLng(playerPosition);
+  map.setView(playerPosition);
   SpawnCacheMarkers(map, board);
-}
+});
+
+const southButton = document.getElementById("south");
+southButton?.addEventListener("click", () => {
+  playerPosition = leaflet.latLng(
+    playerPosition.lat - playerMovement,
+    playerPosition.lng,
+  );
+  playerMarker.setLatLng(playerPosition);
+  map.setView(playerPosition);
+  SpawnCacheMarkers(map, board);
+});
+
+const eastButton = document.getElementById("east");
+eastButton?.addEventListener("click", () => {
+  playerPosition = leaflet.latLng(
+    playerPosition.lat,
+    playerPosition.lng + playerMovement,
+  );
+  playerMarker.setLatLng(playerPosition);
+  map.setView(playerPosition);
+  SpawnCacheMarkers(map, board);
+});
+
+const westButton = document.getElementById("west");
+westButton?.addEventListener("click", () => {
+  playerPosition = leaflet.latLng(
+    playerPosition.lat,
+    playerPosition.lng - playerMovement,
+  );
+  playerMarker.setLatLng(playerPosition);
+  map.setView(playerPosition);
+  SpawnCacheMarkers(map, board);
+});
 
 CreateGame();
