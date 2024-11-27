@@ -4,27 +4,41 @@ interface Momento<T> {
   fromMomento(momento: T): void;
 }
 
+//geocache
 class Geocache implements Momento<string> {
   i: number;
   j: number;
-  numCoins: number;
+  coins: { serial: number; i: number; j: number }[];
 
-  constructor(i: number, j: number, numCoins: number) {
+  constructor(
+    i: number,
+    j: number,
+    coins: { serial: number; i: number; j: number }[],
+  ) {
     this.i = i;
     this.j = j;
-    this.numCoins = numCoins;
+    this.coins = coins;
   }
 
   toMomento(): string {
-    return JSON.stringify({ i: this.i, j: this.j, numCoins: this.numCoins });
+    return JSON.stringify({ i: this.i, j: this.j, coins: this.coins });
   }
 
   fromMomento(momento: string): void {
-    const { i, j, numCoins } = JSON.parse(momento);
+    const { i, j, coins } = JSON.parse(momento);
     this.i = i;
     this.j = j;
-    this.numCoins = numCoins;
+    this.coins = coins;
   }
+}
+
+//game state interface to save/load
+interface GameState {
+  playerPosition: { lat: number; lng: number };
+  playerPoints: number;
+  playerInventory: { i: number; j: number; serial: number }[];
+  cacheState: Record<string, string>;
+  playerPath: leaflet.latLng[];
 }
 
 //imports
@@ -42,32 +56,50 @@ const tileSizeDegrees = 1e-4;
 const cacheNeighborhoodSize = 8;
 const cacheSpawnRate = 0.1;
 const playerMovement = 1e-4;
-const playerPoints = 0;
 
 //game variables
 let playerPosition = mapCenter;
 let playerMarker: leaflet.Marker;
 let map: leaflet.Map;
 let board: Board;
+let playerPoints = 0;
+let playerPolyline: leaflet.Polyline;
+let sensorInterval: number | null = null;
 
 //display for player points
 const statusPanel = document.querySelector<HTMLDivElement>("#statusPanel")!;
 
-//keeps track of coins/inventory/caches
-const coinInCache: Record<string, { i: number; j: number; serial: number }[]> =
+//keeps track of coins/inventory/caches/path history
+let coinInCache: Record<string, { i: number; j: number; serial: number }[]> =
   {};
-const playerInventory: { i: number; j: number; serial: number }[] = [];
+// deno-lint-ignore prefer-const
+let playerInventory: { i: number; j: number; serial: number }[] = [];
 const cacheState: Record<string, string> = {};
+const playerPath: leaflet.latLng[] = [];
 
 //starts game
 function CreateGame() {
   map = CreateMap();
   board = new Board(tileSizeDegrees, cacheNeighborhoodSize);
-  InitializePlayer(map);
-  SpawnCacheMarkers(map, board);
+
+  //checks if there is a saved game state
+  if (!LoadGameState()) {
+    playerPath.push(playerPosition);
+    SpawnCacheMarkers(map, board);
+    InitializePlayer(map);
+  } else {
+    playerMarker = leaflet.marker(playerPosition);
+    playerMarker.bindTooltip("You Are Here");
+    playerMarker.addTo(map);
+    map.setView(playerPosition);
+    playerPath.push(playerPosition);
+    statusPanel.innerHTML =
+      `${playerPoints} points | Inventory: ${playerInventory.length} coins`;
+    SpawnCacheMarkers(map, board);
+  }
 }
 
-//function creates map
+//creates map using constant values
 function CreateMap(): leaflet.Map {
   const map = leaflet.map(document.getElementById("map")!, {
     center: mapCenter,
@@ -77,7 +109,6 @@ function CreateMap(): leaflet.Map {
     zoomControl: false,
     scrollWheelZoom: true,
   });
-
   leaflet.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
     maxZoom: 19,
     attribution:
@@ -87,16 +118,47 @@ function CreateMap(): leaflet.Map {
   return map;
 }
 
+//#region Player Functions
 //adds player marker
 function InitializePlayer(map: leaflet.Map) {
   playerMarker = leaflet.marker(mapCenter);
   playerMarker.bindTooltip("You are Here!");
   playerMarker.addTo(map);
-
+  playerPath.push(playerPosition);
   statusPanel.innerHTML =
     `${playerPoints} points | Inventory: ${playerInventory}`;
 }
 
+//updates inventory values
+function UpdateInventory() {
+  const inventoryList = playerInventory.map((coin) =>
+    `${coin.i}: ${coin.j} #${coin.serial}`
+  ).join("<br>");
+
+  statusPanel.innerHTML =
+    `${playerPoints} points | Inventory: ${playerInventory.length} coins
+    <div><br>${inventoryList}</div>`;
+}
+
+//draw player path
+function updatePlayerPath() {
+  //push position to path array
+  playerPath.push(playerPosition);
+
+  if (playerPolyline) {
+    map.removeLayer(playerPolyline);
+  }
+
+  //create line and add it to map
+  playerPolyline = leaflet.polyline(playerPath, {
+    color: "red",
+    weight: 3,
+  });
+  playerPolyline.addTo(map);
+}
+//#endregion
+
+//#region Cache Functions
 function InitializeCacheCoins(cell: Cell, coinCount: number) {
   const cacheKey = `${cell.i},${cell.j}`;
   if (!(cacheKey in coinInCache)) {
@@ -113,7 +175,7 @@ function InitializeCacheCoins(cell: Cell, coinCount: number) {
 
 //spawns cache near player's neighborhood
 function SpawnCacheMarkers(map: leaflet.Map, board: Board) {
-  //removes rectangles from map
+  // Removes rectangles from the map
   map.eachLayer((layer: leaflet.Layer) => {
     if (layer instanceof leaflet.Rectangle) {
       map.removeLayer(layer);
@@ -122,33 +184,35 @@ function SpawnCacheMarkers(map: leaflet.Map, board: Board) {
 
   const cells = board.getCellsNearPoint(playerPosition);
   const visibleCaches = new Set();
-
   for (const cell of cells) {
     const cacheKey = `${cell.i},${cell.j}`;
     visibleCaches.add(cacheKey);
 
-    //restores caches from momento, otherwise create new cache
+    //restores cache, otherwise creates cache
     if (cacheState[cacheKey]) {
-      const geoCache = new Geocache(0, 0, 0);
+      const geoCache = new Geocache(0, 0, []);
       geoCache.fromMomento(cacheState[cacheKey]);
+      coinInCache[cacheKey] = [...geoCache.coins];
       AddCacheMarker(map, board, cell);
     } else if (luck(cacheKey) < cacheSpawnRate) {
-      AddCacheMarker(map, board, cell);
+      const coins = [];
+      const coinCount = Math.floor(luck(`${cell.i},${cell.j},value`) * 20);
 
-      const geoCache = new Geocache(
-        cell.i,
-        cell.j,
-        Math.floor(luck(`${cell.i},${cell.j},value`) * 20),
-      );
+      for (let serial = 0; serial < coinCount; serial++) {
+        coins.push({ i: cell.i, j: cell.j, serial });
+      }
+
+      const geoCache = new Geocache(cell.i, cell.j, coins);
+      coinInCache[cacheKey] = coins;
       cacheState[cacheKey] = geoCache.toMomento();
+      AddCacheMarker(map, board, cell);
     }
   }
 
-  //saves states for caches out of range
+  //save states for caches out of range
   for (const cacheKey in cacheState) {
     if (!visibleCaches.has(cacheKey)) {
-      const cell = cacheKey.split(",").map(Number);
-      const geocache = new Geocache(cell[0], cell[1], 0);
+      const geocache = new Geocache(0, 0, []);
       geocache.fromMomento(cacheState[cacheKey]);
       cacheState[cacheKey] = geocache.toMomento();
     }
@@ -160,8 +224,8 @@ function AddCacheMarker(map: leaflet.Map, board: Board, cell: Cell) {
   const rect = leaflet.rectangle(bounds);
   rect.addTo(map);
   const coinCount = Math.floor(luck(`${cell.i},${cell.j},value`) * 20);
-  InitializeCacheCoins(cell, coinCount);
 
+  InitializeCacheCoins(cell, coinCount);
   BindCachePopup(rect, cell);
 }
 
@@ -195,6 +259,8 @@ function BindCachePopup(rect: leaflet.Rectangle, cell: Cell) {
           rect.unbindPopup();
           BindCachePopup(rect, cell);
           rect.openPopup();
+
+          saveGameState();
         }
       }
     });
@@ -212,10 +278,11 @@ function BindCachePopup(rect: leaflet.Rectangle, cell: Cell) {
           rect.unbindPopup();
           BindCachePopup(rect, cell);
           rect.openPopup();
+
+          saveGameState();
         }
       }
     });
-
     return popupDiv;
   });
 }
@@ -223,31 +290,25 @@ function BindCachePopup(rect: leaflet.Rectangle, cell: Cell) {
 //updates caches when coins are collected/deposited
 function UpdateCacheState(cacheKey: string) {
   const [i, j] = cacheKey.split(",").map(Number);
-  const geocache = new Geocache(i, j, coinInCache[cacheKey]?.length || 0);
+  const geocache = new Geocache(i, j, coinInCache[cacheKey] || []);
   cacheState[cacheKey] = geocache.toMomento();
 }
+//#endregion
 
-//updates inventory values
-function UpdateInventory() {
-  const inventoryList = playerInventory.map((coin) =>
-    `${coin.i}: ${coin.j} #${coin.serial}`
-  ).join("<br>");
-
-  statusPanel.innerHTML =
-    `${playerPoints} points | Inventory: ${playerInventory.length} coins
-    <div><br>${inventoryList}</div>`;
-}
-
-//add listener events for buttons to move player/map and generate new caches
+//#region Button Listener Events
+//add listener events for buttons to move player/map, generate new caches, update polyline, and save game state
 const northButton = document.getElementById("north");
 northButton?.addEventListener("click", () => {
   playerPosition = leaflet.latLng(
     playerPosition.lat + playerMovement,
     playerPosition.lng,
   );
+
   playerMarker.setLatLng(playerPosition);
   map.setView(playerPosition);
   SpawnCacheMarkers(map, board);
+  updatePlayerPath();
+  saveGameState();
 });
 
 const southButton = document.getElementById("south");
@@ -256,9 +317,12 @@ southButton?.addEventListener("click", () => {
     playerPosition.lat - playerMovement,
     playerPosition.lng,
   );
+
   playerMarker.setLatLng(playerPosition);
   map.setView(playerPosition);
   SpawnCacheMarkers(map, board);
+  updatePlayerPath();
+  saveGameState();
 });
 
 const eastButton = document.getElementById("east");
@@ -267,9 +331,12 @@ eastButton?.addEventListener("click", () => {
     playerPosition.lat,
     playerPosition.lng + playerMovement,
   );
+
   playerMarker.setLatLng(playerPosition);
   map.setView(playerPosition);
   SpawnCacheMarkers(map, board);
+  updatePlayerPath();
+  saveGameState();
 });
 
 const westButton = document.getElementById("west");
@@ -278,9 +345,145 @@ westButton?.addEventListener("click", () => {
     playerPosition.lat,
     playerPosition.lng - playerMovement,
   );
+
   playerMarker.setLatLng(playerPosition);
   map.setView(playerPosition);
   SpawnCacheMarkers(map, board);
+  updatePlayerPath();
+  saveGameState();
 });
+
+const sensorButton = document.getElementById("sensor");
+sensorButton?.addEventListener("click", () => {
+  if (sensorInterval === null) {
+    GrabPlayerLocation();
+    sensorButton.style.backgroundColor = "black";
+  }
+  if (sensorInterval === null) {
+    sensorInterval = globalThis.setInterval(() => {
+      GrabPlayerLocation();
+      sensorButton.style.backgroundColor = "black";
+    }, 3000);
+  } else {
+    clearInterval(sensorInterval);
+    sensorInterval = null;
+    sensorButton.style.backgroundColor = "";
+  }
+});
+
+const resetButton = document.getElementById("reset");
+resetButton?.addEventListener("click", () => {
+  const resetPrompt = prompt("Type in 'reset' to confirm: ");
+  if (resetPrompt == "reset" || resetPrompt == "Reset") {
+    ResetGame();
+  } else {
+    alert("You did not type in 'reset'. Reset request is denied.");
+  }
+});
+//#endregion
+
+//#region Geolocation
+//gets player location
+function GrabPlayerLocation() {
+  if ("geolocation" in navigator) {
+    getPosition()
+      .then((position) => {
+        const latitude = position.coords.latitude;
+        const longitude = position.coords.longitude;
+        console.log(`Latitude: ${latitude}, Longitude: ${longitude}`);
+
+        playerPosition = leaflet.latLng(latitude, longitude);
+        playerMarker.setLatLng(playerPosition);
+        map.setView(playerPosition);
+        SpawnCacheMarkers(map, board);
+      })
+      .catch((error) => {
+        console.error("Error getting geolocation:", error);
+      });
+  } else {
+    console.error("Geolocation is not supported by this browser.");
+  }
+}
+
+function getPosition(): Promise<GeolocationPosition> {
+  return new Promise((resolve, reject) => {
+    navigator.geolocation.getCurrentPosition(resolve, reject);
+  });
+}
+//#endregion
+
+//#region Save/Load/Reset Game State
+//creates game state and sets it in local storage
+function saveGameState() {
+  const gameState: GameState = {
+    playerPosition: { lat: playerPosition.lat, lng: playerPosition.lng },
+    playerPoints,
+    playerInventory,
+    cacheState,
+    playerPath,
+  };
+
+  playerPath.push(playerPosition);
+  localStorage.setItem("gameState", JSON.stringify(gameState));
+}
+
+//loads saved game state if any and assigns values to variables
+function LoadGameState() {
+  const savedState = localStorage.getItem("gameState");
+  if (savedState) {
+    const gameState: GameState = JSON.parse(savedState);
+    playerPosition = leaflet.latLng(
+      gameState.playerPosition.lat,
+      gameState.playerPosition.lng,
+    );
+    playerPoints = gameState.playerPoints;
+    playerInventory.splice(
+      0,
+      playerInventory.length,
+      ...gameState.playerInventory,
+    );
+    Object.assign(cacheState, gameState.cacheState);
+
+    // Reconstruct coinInCache from cacheState
+    for (const cacheKey in cacheState) {
+      const { coins } = JSON.parse(cacheState[cacheKey]);
+      coinInCache[cacheKey] = coins; // Restore coin details
+    }
+
+    playerPath.splice(0, playerPath.length, ...gameState.playerPath);
+    updatePlayerPath();
+    return true;
+  }
+  return false;
+}
+
+//resets the game's state
+function ResetGame() {
+  // Reset player position, inventory, and polyline
+  playerPosition = mapCenter;
+  playerMarker.setLatLng(playerPosition);
+  map.setView(playerPosition);
+
+  playerInventory.length = 0;
+  playerPoints = 0;
+  UpdateInventory();
+
+  playerPath.length = 0;
+  if (playerPolyline) {
+    map.removeLayer(playerPolyline);
+  }
+
+  // Clear caches and reset cache state
+  coinInCache = {}; // Clear all coins
+  Object.keys(cacheState).forEach((key) => delete cacheState[key]); // Clear cache state
+
+  SpawnCacheMarkers(map, board); // Regenerate caches and coins
+  localStorage.removeItem("gameState");
+  statusPanel.innerHTML =
+    `${playerPoints} points | Inventory: ${playerInventory.length} coins`;
+  playerPath.push(playerPosition);
+}
+
+//#endregion
 
 CreateGame();
