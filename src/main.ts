@@ -304,8 +304,7 @@ northButton?.addEventListener("click", () => {
     playerPosition.lng,
   );
 
-  playerMarker.setLatLng(playerPosition);
-  map.setView(playerPosition);
+  UpdatePlayerView();
   SpawnCacheMarkers(map, board);
   updatePlayerPath();
   saveGameState();
@@ -318,8 +317,7 @@ southButton?.addEventListener("click", () => {
     playerPosition.lng,
   );
 
-  playerMarker.setLatLng(playerPosition);
-  map.setView(playerPosition);
+  UpdatePlayerView();
   SpawnCacheMarkers(map, board);
   updatePlayerPath();
   saveGameState();
@@ -332,8 +330,7 @@ eastButton?.addEventListener("click", () => {
     playerPosition.lng + playerMovement,
   );
 
-  playerMarker.setLatLng(playerPosition);
-  map.setView(playerPosition);
+  UpdatePlayerView();
   SpawnCacheMarkers(map, board);
   updatePlayerPath();
   saveGameState();
@@ -346,8 +343,7 @@ westButton?.addEventListener("click", () => {
     playerPosition.lng - playerMovement,
   );
 
-  playerMarker.setLatLng(playerPosition);
-  map.setView(playerPosition);
+  UpdatePlayerView();
   SpawnCacheMarkers(map, board);
   updatePlayerPath();
   saveGameState();
@@ -357,11 +353,13 @@ const sensorButton = document.getElementById("sensor");
 sensorButton?.addEventListener("click", () => {
   if (sensorInterval === null) {
     GrabPlayerLocation();
+    SpawnCacheMarkers(map, board);
     sensorButton.style.backgroundColor = "black";
   }
   if (sensorInterval === null) {
     sensorInterval = globalThis.setInterval(() => {
       GrabPlayerLocation();
+      SpawnCacheMarkers(map, board);
       sensorButton.style.backgroundColor = "black";
     }, 3000);
   } else {
@@ -393,9 +391,7 @@ function GrabPlayerLocation() {
         console.log(`Latitude: ${latitude}, Longitude: ${longitude}`);
 
         playerPosition = leaflet.latLng(latitude, longitude);
-        playerMarker.setLatLng(playerPosition);
-        map.setView(playerPosition);
-        SpawnCacheMarkers(map, board);
+        UpdatePlayerView();
       })
       .catch((error) => {
         console.error("Error getting geolocation:", error);
@@ -409,6 +405,17 @@ function getPosition(): Promise<GeolocationPosition> {
   return new Promise((resolve, reject) => {
     navigator.geolocation.getCurrentPosition(resolve, reject);
   });
+}
+
+function UpdatePlayerView() {
+  if (playerMarker) {
+    playerMarker.setLatLng(playerPosition);
+    playerMarker.bindTooltip("You Are Here");
+  }
+
+  if (map) {
+    map.setView(playerPosition);
+  }
 }
 //#endregion
 
