@@ -85,7 +85,7 @@ function CreateGame() {
   //checks if there is a saved game state
   if (!LoadGameState()) {
     playerPath.push(playerPosition);
-    SpawnCacheMarkers(map, board);
+    SpawnCacheMarkers(map, board, cacheState);
     InitializePlayer(map);
   } else {
     playerMarker = leaflet.marker(playerPosition);
@@ -95,7 +95,7 @@ function CreateGame() {
     playerPath.push(playerPosition);
     statusPanel.innerHTML =
       `${playerPoints} points | Inventory: ${playerInventory.length} coins`;
-    SpawnCacheMarkers(map, board);
+    SpawnCacheMarkers(map, board, cacheState);
   }
 }
 
@@ -174,7 +174,11 @@ function InitializeCacheCoins(cell: Cell, coinCount: number) {
 }
 
 //spawns cache near player's neighborhood
-function SpawnCacheMarkers(map: leaflet.Map, board: Board) {
+function SpawnCacheMarkers(
+  map: leaflet.Map,
+  board: Board,
+  cacheState: Record<string, string>,
+) {
   // Removes rectangles from the map
   map.eachLayer((layer: leaflet.Layer) => {
     if (layer instanceof leaflet.Rectangle) {
@@ -193,7 +197,7 @@ function SpawnCacheMarkers(map: leaflet.Map, board: Board) {
       const geoCache = new Geocache(0, 0, []);
       geoCache.fromMomento(cacheState[cacheKey]);
       coinInCache[cacheKey] = [...geoCache.coins];
-      AddCacheMarker(map, board, cell);
+      AddCacheMarker(map, board, cell, cacheState);
     } else if (luck(cacheKey) < cacheSpawnRate) {
       const coins = [];
       const coinCount = Math.floor(luck(`${cell.i},${cell.j},value`) * 20);
@@ -205,7 +209,7 @@ function SpawnCacheMarkers(map: leaflet.Map, board: Board) {
       const geoCache = new Geocache(cell.i, cell.j, coins);
       coinInCache[cacheKey] = coins;
       cacheState[cacheKey] = geoCache.toMomento();
-      AddCacheMarker(map, board, cell);
+      AddCacheMarker(map, board, cell, cacheState);
     }
   }
 
@@ -219,18 +223,27 @@ function SpawnCacheMarkers(map: leaflet.Map, board: Board) {
   }
 }
 
-function AddCacheMarker(map: leaflet.Map, board: Board, cell: Cell) {
+function AddCacheMarker(
+  map: leaflet.Map,
+  board: Board,
+  cell: Cell,
+  cacheState: Record<string, string>,
+) {
   const bounds = board.getCellBounds(cell);
   const rect = leaflet.rectangle(bounds);
   rect.addTo(map);
   const coinCount = Math.floor(luck(`${cell.i},${cell.j},value`) * 20);
 
   InitializeCacheCoins(cell, coinCount);
-  BindCachePopup(rect, cell);
+  BindCachePopup(rect, cell, cacheState);
 }
 
 //binds popup to a cache, allow for player withdraw/deposit coins
-function BindCachePopup(rect: leaflet.Rectangle, cell: Cell) {
+function BindCachePopup(
+  rect: leaflet.Rectangle,
+  cell: Cell,
+  cacheState: Record<string, string>,
+) {
   const cacheKey = `${cell.i},${cell.j}`;
   const cacheCoins = coinInCache[cacheKey] || [];
 
@@ -257,7 +270,7 @@ function BindCachePopup(rect: leaflet.Rectangle, cell: Cell) {
           //refreshes popup
           rect.closePopup();
           rect.unbindPopup();
-          BindCachePopup(rect, cell);
+          BindCachePopup(rect, cell, cacheState);
           rect.openPopup();
 
           saveGameState();
@@ -276,7 +289,7 @@ function BindCachePopup(rect: leaflet.Rectangle, cell: Cell) {
 
           rect.closePopup();
           rect.unbindPopup();
-          BindCachePopup(rect, cell);
+          BindCachePopup(rect, cell, cacheState);
           rect.openPopup();
 
           saveGameState();
@@ -305,7 +318,7 @@ northButton?.addEventListener("click", () => {
   );
 
   UpdatePlayerView();
-  SpawnCacheMarkers(map, board);
+  SpawnCacheMarkers(map, board, cacheState);
   updatePlayerPath();
   saveGameState();
 });
@@ -318,7 +331,7 @@ southButton?.addEventListener("click", () => {
   );
 
   UpdatePlayerView();
-  SpawnCacheMarkers(map, board);
+  SpawnCacheMarkers(map, board, cacheState);
   updatePlayerPath();
   saveGameState();
 });
@@ -331,7 +344,7 @@ eastButton?.addEventListener("click", () => {
   );
 
   UpdatePlayerView();
-  SpawnCacheMarkers(map, board);
+  SpawnCacheMarkers(map, board, cacheState);
   updatePlayerPath();
   saveGameState();
 });
@@ -344,7 +357,7 @@ westButton?.addEventListener("click", () => {
   );
 
   UpdatePlayerView();
-  SpawnCacheMarkers(map, board);
+  SpawnCacheMarkers(map, board, cacheState);
   updatePlayerPath();
   saveGameState();
 });
@@ -353,13 +366,13 @@ const sensorButton = document.getElementById("sensor");
 sensorButton?.addEventListener("click", () => {
   if (sensorInterval === null) {
     GrabPlayerLocation();
-    SpawnCacheMarkers(map, board);
+    SpawnCacheMarkers(map, board, cacheState);
     sensorButton.style.backgroundColor = "black";
   }
   if (sensorInterval === null) {
     sensorInterval = globalThis.setInterval(() => {
       GrabPlayerLocation();
-      SpawnCacheMarkers(map, board);
+      SpawnCacheMarkers(map, board, cacheState);
       sensorButton.style.backgroundColor = "black";
     }, 3000);
   } else {
@@ -388,8 +401,6 @@ function GrabPlayerLocation() {
       .then((position) => {
         const latitude = position.coords.latitude;
         const longitude = position.coords.longitude;
-        console.log(`Latitude: ${latitude}, Longitude: ${longitude}`);
-
         playerPosition = leaflet.latLng(latitude, longitude);
         UpdatePlayerView();
       })
@@ -407,6 +418,7 @@ function getPosition(): Promise<GeolocationPosition> {
   });
 }
 
+// updates the player marker position and recenters the map to the player
 function UpdatePlayerView() {
   if (playerMarker) {
     playerMarker.setLatLng(playerPosition);
@@ -484,7 +496,7 @@ function ResetGame() {
   coinInCache = {}; // Clear all coins
   Object.keys(cacheState).forEach((key) => delete cacheState[key]); // Clear cache state
 
-  SpawnCacheMarkers(map, board); // Regenerate caches and coins
+  SpawnCacheMarkers(map, board, cacheState); // Regenerate caches and coins
   localStorage.removeItem("gameState");
   statusPanel.innerHTML =
     `${playerPoints} points | Inventory: ${playerInventory.length} coins`;
