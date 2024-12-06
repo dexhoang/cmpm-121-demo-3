@@ -174,6 +174,7 @@ function InitializeCacheCoins(cell: Cell, coinCount: number) {
 }
 
 //spawns cache near player's neighborhood
+//refectored to take cacheState as an explicit parameter (previously global)
 function SpawnCacheMarkers(
   map: leaflet.Map,
   board: Board,
